@@ -626,6 +626,8 @@ impl WorkflowPersistence for NatsPersistence {
             "instance_audit",
             "instance_states",
             "conditional_starts",
+            "definition_collections",
+            "message_receipts",
         ];
         for name in &kv_bucket_names {
             match self.js.get_key_value(*name).await {
@@ -852,6 +854,8 @@ impl WorkflowPersistence for NatsPersistence {
             "instance_audit",
             "instance_states",
             "conditional_starts",
+            "definition_collections",
+            "message_receipts",
         ];
 
         if kv_bucket_names.contains(&bucket_name) {
@@ -1001,6 +1005,8 @@ impl WorkflowPersistence for NatsPersistence {
             "instance_audit",
             "instance_states",
             "conditional_starts",
+            "definition_collections",
+            "message_receipts",
         ];
 
         if kv_bucket_names.contains(&bucket_name) {

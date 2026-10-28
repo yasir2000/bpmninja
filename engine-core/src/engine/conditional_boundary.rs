@@ -189,6 +189,12 @@ impl WorkflowEngine {
     /// Close only this visit. Clearing the caller marker allows its continuation
     /// while stale copies remain fenced by the removed activation identity.
     pub(crate) fn close_conditional_boundaries(instance: &mut ProcessInstance, token: &mut Token) {
+        if let Some(state) = &mut instance.event_state {
+            state
+                .message_boundaries
+                .retain(|key, _| !key.starts_with(&format!("{}/", token.id)));
+        }
+
         if let Some(id) = token.boundary_activation.take()
             && let Some(state) = &mut instance.event_state
             && state

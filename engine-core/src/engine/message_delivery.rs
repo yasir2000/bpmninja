@@ -55,6 +55,8 @@ pub struct MessageReceipt {
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MessageCleanup {
+    #[serde(default)]
+    pub rearm: Option<(crate::PendingMessageCatch, String)>,
     pub messages: Vec<Uuid>,
     pub timers: Vec<Uuid>,
     pub users: Vec<Uuid>,
@@ -341,6 +343,26 @@ impl WorkflowEngine {
                 p.delete_service_task(*id).await?;
             }
         }
+        if let Some((catch, attached_to)) = &c.rearm
+            && let Some(instance) = self.instances.get(&catch.instance_id).await
+        {
+            let current = instance.read().await;
+            let key = format!("{}/{}", catch.token_id, catch.node_id);
+            if current
+                .event_state
+                .as_ref()
+                .is_some_and(|s| s.message_boundaries.get(&key) == Some(&catch.id))
+                && current.tokens.get(&catch.token_id).is_some_and(|t| {
+                    t.current_node == *attached_to
+                        && super::event_subprocess::token_valid(&current, t)
+                })
+            {
+                if let Some(p) = &self.persistence {
+                    p.save_message_catch(catch).await?;
+                }
+                self.pending_message_catches.insert(catch.id, catch.clone());
+            }
+        }
         for id in &c.children {
             self.abort_event_child(*id).await;
             if self.instances.get(id).await.is_some() {
@@ -363,6 +385,21 @@ impl WorkflowEngine {
             for inbox in state.message_inbox.values() {
                 self.cleanup_message_jobs(inbox).await?;
                 self.retain_message_receipt(&inbox.receipt).await?;
+            }
+        }
+        Ok(())
+    }
+    /// Once the permanent receipt exists, the per-instance bridge can be
+    /// removed. Long-running receivers must not accumulate whole payload copies.
+    async fn prune_message_inbox(&self, id: Uuid, delivery: Uuid) -> EngineResult<()> {
+        let _step = self.message_instance_locks.lock(id).await;
+        let _persist = self.persist_locks.lock(id).await;
+        if let Some(instance) = self.instances.get(&id).await {
+            let mut current = instance.write().await;
+            if let Some(state) = current.event_state.as_mut()
+                && state.message_inbox.remove(&delivery).is_some()
+            {
+                self.save_message_snapshot(&current).await?;
             }
         }
         Ok(())
@@ -393,14 +430,14 @@ impl WorkflowEngine {
             drop(_step);
             self.cleanup_message_jobs(inbox).await?;
             self.retain_message_receipt(&inbox.receipt).await?;
+            self.prune_message_inbox(id, delivery.id).await?;
             return Ok(true);
         }
-        if self.instances.get(&id).await.is_none() {
-            if let Some(p) = &self.persistence
-                && let Some(snapshot) = p.get_active_instance(id).await?
-            {
-                self.restore_instance(snapshot).await;
-            }
+        if self.instances.get(&id).await.is_none()
+            && let Some(p) = &self.persistence
+            && let Some(snapshot) = p.get_active_instance(id).await?
+        {
+            self.restore_instance(snapshot).await;
         }
         if self.instances.get(&id).await.is_none() {
             if !matches!(receiver, MessageReceiver::Start { .. }) {
@@ -498,6 +535,7 @@ impl WorkflowEngine {
             drop(_step);
             self.cleanup_message_jobs(&inbox).await?;
             self.retain_message_receipt(&inbox.receipt).await?;
+            self.prune_message_inbox(id, delivery.id).await?;
             return Ok(true);
         }
         let MessageReceiver::Catch {
@@ -583,6 +621,13 @@ impl WorkflowEngine {
         {
             return Ok(false);
         }
+        if let Some(live) = current.event_state.as_ref().and_then(|s| {
+            s.message_boundaries
+                .get(&format!("{token_id}/{}", catch.node_id))
+        }) && *live != *catch_id
+        {
+            return Ok(false);
+        }
         let mut candidate = current.clone();
         let mut token = original.clone();
         token.id = delivery.id;
@@ -644,6 +689,22 @@ impl WorkflowEngine {
         let state = candidate.event_state.get_or_insert_with(Default::default);
         if interrupt {
             state.boundary_activations.remove(token_id);
+            state
+                .message_boundaries
+                .retain(|key, _| !key.starts_with(&format!("{token_id}/")));
+        } else if let Some((attached_to, _)) = &boundary {
+            let mut rearm = catch.clone();
+            rearm.id = Uuid::new_v4();
+            state
+                .message_boundaries
+                .insert(format!("{token_id}/{}", catch.node_id), rearm.id);
+            if let Some(activation) = state.boundary_activations.get_mut(token_id) {
+                activation.jobs.remove(catch_id);
+                activation.jobs.insert(rearm.id);
+                activation.messages.retain(|m| m.id != *catch_id);
+                activation.messages.push(rearm.clone());
+            }
+            cleanup.rearm = Some((rearm, attached_to.clone()));
         }
         if let Some(group) = group.filter(|_| valid_gateway) {
             state.gateway_waits.remove(token_id);
@@ -712,6 +773,7 @@ impl WorkflowEngine {
         drop(_step);
         self.cleanup_message_jobs(&inbox).await?;
         self.retain_message_receipt(&inbox.receipt).await?;
+        self.prune_message_inbox(id, delivery.id).await?;
         Ok(true)
     }
     /// Retry committed outbox records. No public name broadcast is used. One
@@ -727,9 +789,13 @@ impl WorkflowEngine {
         {
             return Ok(0);
         }
-        let Ok(_dispatch) = self.message_dispatch_lock.try_lock() else {
+        let Ok(mut dispatch) = self.message_dispatch_lock.try_lock() else {
             return Ok(0);
         };
+        // Rotate bounded passes so a prefix of unavailable receivers cannot
+        // indefinitely hide ready deliveries later in the catalog.
+        let offset = *dispatch;
+        *dispatch = offset.wrapping_add(256);
         let unconfirmed: Vec<_> = self
             .message_unconfirmed
             .iter()
@@ -744,7 +810,11 @@ impl WorkflowEngine {
         let mut attempted = HashSet::new();
         let mut failure = None;
         loop {
-            let rows = self.pending_internal_messages().await?;
+            let mut rows = self.pending_internal_messages().await?;
+            if !rows.is_empty() {
+                let start = offset % rows.len();
+                rows.rotate_left(start);
+            }
             let mut progress = false;
             for mut delivery in rows {
                 if attempted.len() >= 256 {
@@ -755,7 +825,10 @@ impl WorkflowEngine {
                 }
                 let result: EngineResult<bool> = async {
                     if let Some(receipt) = self.delivery_receipt(delivery.id).await? {
-                        if !receipt.delivery.same_message(&delivery) {
+                        if !receipt.delivery.same_message(&delivery)
+                            || (delivery.receiver.is_some()
+                                && delivery.receiver != receipt.delivery.receiver)
+                        {
                             return Err(EngineError::PersistenceError(
                                 "Conflicting internal message identity".into(),
                             ));

@@ -1,8 +1,8 @@
 use super::helpers::InstrumentedPersistence;
 use super::message_routing::{deploy, key, metadata, receiver, sender, wait};
 use crate::{
-    BpmnElement, InstanceState, MessageDelivery, MessageReceiver, ProcessDefinitionBuilder,
-    WorkflowEngine, WorkflowPersistence,
+    BpmnElement, InstanceState, MessageDelivery, ProcessDefinitionBuilder, WorkflowEngine,
+    WorkflowPersistence,
 };
 use serde_json::json;
 use std::{
@@ -92,17 +92,39 @@ async fn committed_sender_outbox_survives_crash_and_starts_only_pinned_receiver(
             .unwrap()
             .is_empty()
     );
-    let target = restored.get_instance(&rows[0].id).await.unwrap();
+    let target = restored.get_instance_or_archived(rows[0].id).await.unwrap();
     assert_eq!(target.variables["received"], 1);
     assert_eq!(target.business_key, "order-1");
     let receipt = p.get_message_receipt(rows[0].id).await.unwrap().unwrap();
     replay(&restored, &receipt.delivery).await;
     assert_eq!(restored.process_internal_messages().await.unwrap(), 1);
     assert_eq!(
-        restored.get_instance(&rows[0].id).await.unwrap().variables["received"],
+        restored
+            .get_instance_or_archived(rows[0].id)
+            .await
+            .unwrap()
+            .variables["received"],
         1
     );
     assert_eq!(restored.pending_user_tasks.len(), 1);
+    assert!(
+        restored
+            .get_instance_or_archived(rows[0].id)
+            .await
+            .unwrap()
+            .event_state
+            .unwrap()
+            .message_inbox
+            .is_empty()
+    );
+    let mut conflict = receipt.delivery.clone();
+    conflict.receiver = Some(crate::MessageReceiver::Start {
+        instance_id: uuid::Uuid::new_v4(),
+    });
+    replay(&restored, &conflict).await;
+    assert!(restored.process_internal_messages().await.is_err());
+    replay(&restored, &receipt.delivery).await;
+    assert_eq!(restored.process_internal_messages().await.unwrap(), 1);
     restored.shutdown().await;
 }
 #[tokio::test]
@@ -132,7 +154,11 @@ async fn receiver_commit_before_ack_deduplicates_across_recovery_and_archival() 
     let restored = restore(p.clone()).await;
     assert_eq!(restored.process_internal_messages().await.unwrap(), 1);
     assert_eq!(
-        restored.get_instance(&row.id).await.unwrap().variables["received"],
+        restored
+            .get_instance_or_archived(row.id)
+            .await
+            .unwrap()
+            .variables["received"],
         1
     );
     let task = restored.pending_user_tasks.iter().next().unwrap().task_id;
@@ -144,7 +170,11 @@ async fn receiver_commit_before_ack_deduplicates_across_recovery_and_archival() 
     replay(&restored, &receipt.delivery).await;
     assert_eq!(restored.process_internal_messages().await.unwrap(), 1);
     assert_eq!(
-        restored.get_instance(&row.id).await.unwrap().state,
+        restored
+            .get_instance_or_archived(row.id)
+            .await
+            .unwrap()
+            .state,
         InstanceState::Completed
     );
     assert_eq!(
@@ -175,11 +205,11 @@ async fn missing_and_ambiguous_receivers_are_retained_then_correlated_exactly() 
     engine.suspend_instance(b).await.unwrap();
     assert_eq!(engine.process_internal_messages().await.unwrap(), 1);
     assert_eq!(
-        engine.get_instance(&a).await.unwrap().variables["received"],
+        engine.get_instance_or_archived(a).await.unwrap().variables["received"],
         1
     );
     assert_eq!(
-        engine.get_instance(&b).await.unwrap().variables["received"],
+        engine.get_instance_or_archived(b).await.unwrap().variables["received"],
         0
     );
     assert_eq!(engine.pending_message_catches.len(), 2);
@@ -233,7 +263,6 @@ async fn concurrent_dispatchers_and_repeated_send_occurrences_are_distinct() {
         vec![crate::SequenceFlow {
             target: "e".into(),
             condition: None,
-            is_default: false,
         }],
     );
     let mut data = metadata();
@@ -310,7 +339,7 @@ async fn gateway_and_interrupting_boundary_delivery_cancel_exact_siblings() {
         let target = wait(&engine, key(&batch, "receiver"), "order-1").await;
         wait(&engine, key(&batch, "sender"), "order-1").await;
         assert_eq!(
-            engine.get_instance(&target).await.unwrap().state,
+            engine.get_instance_or_archived(target).await.unwrap().state,
             InstanceState::Completed
         );
         assert!(engine.pending_user_tasks.is_empty());
@@ -318,4 +347,165 @@ async fn gateway_and_interrupting_boundary_delivery_cancel_exact_siblings() {
         assert!(engine.pending_message_catches.is_empty());
         assert!(engine.pending_internal_messages().await.unwrap().is_empty());
     }
+}
+
+#[tokio::test]
+async fn sequence_flow_revisits_of_one_send_node_get_distinct_durable_occurrences() {
+    let engine = WorkflowEngine::new();
+    let source = ProcessDefinitionBuilder::new("sender")
+        .node("s", BpmnElement::StartEvent)
+        .node(
+            "send",
+            BpmnElement::SendTask {
+                message_name: "order".into(),
+                multi_instance: None,
+            },
+        )
+        .node(
+            "step",
+            BpmnElement::ScriptTask {
+                script: "count += 1;".into(),
+                multi_instance: None,
+            },
+        )
+        .node(
+            "choice",
+            BpmnElement::ExclusiveGateway {
+                default: Some("e".into()),
+            },
+        )
+        .node("e", BpmnElement::EndEvent)
+        .flow("s", "send")
+        .flow("send", "step")
+        .flow("step", "choice")
+        .conditional_flow("choice", "send", "count < 3")
+        .flow("choice", "e")
+        .build()
+        .unwrap();
+    let mut source = source;
+    source.variable_defaults.insert("count".into(), json!(0));
+    let batch = engine
+        .deploy_collection(vec![source, receiver(true)], "xml".into(), metadata())
+        .await
+        .unwrap();
+    let dispatch = engine.message_dispatch_lock.lock().await;
+    wait(&engine, key(&batch, "sender"), "order-1").await;
+    let rows = engine.pending_internal_messages().await.unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows.iter().map(|r| r.source_revision).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(
+        rows.iter()
+            .map(|r| r.id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
+    assert_eq!(
+        rows.iter()
+            .map(|r| r.variables["count"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    drop(dispatch);
+    assert_eq!(engine.process_internal_messages().await.unwrap(), 3);
+    assert_eq!(engine.pending_user_tasks.len(), 3);
+}
+
+#[tokio::test]
+async fn unavailable_prefix_cannot_starve_ready_delivery_beyond_the_batch_limit() {
+    let engine = WorkflowEngine::new();
+    let batch = deploy(&engine, receiver(false)).await;
+    let dispatch = engine.message_dispatch_lock.lock().await;
+    let source = wait(&engine, key(&batch, "sender"), "missing").await;
+    let base = engine
+        .pending_internal_messages()
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let instance = engine.instances.get(&source).await.unwrap();
+    {
+        let mut snapshot = instance.write().await;
+        let outbox = &mut snapshot.event_state.as_mut().unwrap().message_outbox;
+        outbox.clear();
+        for revision in 1..=257 {
+            let mut row = base.clone();
+            row.id = uuid::Uuid::new_v4();
+            row.source_revision = revision;
+            if revision == 257 {
+                row.business_key = "ready".into();
+            }
+            outbox.insert(row.id, row);
+        }
+    }
+    let target = wait(&engine, key(&batch, "receiver"), "ready").await;
+    drop(dispatch);
+    assert_eq!(engine.process_internal_messages().await.unwrap(), 0);
+    assert_eq!(engine.process_internal_messages().await.unwrap(), 1);
+    assert!(
+        engine
+            .pending_user_tasks
+            .iter()
+            .any(|t| t.instance_id == target)
+    );
+    assert_eq!(engine.pending_internal_messages().await.unwrap().len(), 256);
+}
+
+#[tokio::test]
+async fn noninterrupting_boundary_rearms_without_cancelling_the_original_activity() {
+    let engine = WorkflowEngine::new();
+    let target = ProcessDefinitionBuilder::new("receiver")
+        .node("s", BpmnElement::StartEvent)
+        .node("work", BpmnElement::UserTask("worker".into()))
+        .node(
+            "receive",
+            BpmnElement::BoundaryMessageEvent {
+                attached_to: "work".into(),
+                message_name: "order".into(),
+                cancel_activity: false,
+            },
+        )
+        .node("e", BpmnElement::EndEvent)
+        .flow("s", "work")
+        .flow("work", "e")
+        .flow("receive", "e")
+        .build()
+        .unwrap();
+    let mut target = target;
+    target.variable_defaults.insert("received".into(), json!(0));
+    target.listeners.insert(
+        "receive".into(),
+        vec![crate::ExecutionListener {
+            event: crate::ListenerEvent::End,
+            script: "received += 1;".into(),
+        }],
+    );
+    let batch = deploy(&engine, target).await;
+    let target = wait(&engine, key(&batch, "receiver"), "order-1").await;
+    let original = engine.pending_user_tasks.iter().next().unwrap().task_id;
+    for _ in 0..2 {
+        wait(&engine, key(&batch, "sender"), "order-1").await;
+        assert!(engine.pending_user_tasks.contains_key(&original));
+        assert_eq!(engine.pending_message_catches.len(), 1);
+    }
+    assert_eq!(
+        engine
+            .get_instance_or_archived(target)
+            .await
+            .unwrap()
+            .variables["received"],
+        2
+    );
+    engine
+        .complete_user_task(original, HashMap::new())
+        .await
+        .unwrap();
+    assert!(engine.pending_message_catches.is_empty());
+    assert_eq!(
+        engine.get_instance_or_archived(target).await.unwrap().state,
+        InstanceState::Completed
+    );
 }

@@ -392,3 +392,145 @@ async fn jetstream_restores_routes_pinned_to_the_original_pool_versions() {
     assert!(restored.list_instances().await.is_empty());
     engine.shutdown().await;
 }
+
+#[tokio::test]
+async fn jetstream_durable_delivery_restarts_and_deduplicates_archived_receivers() {
+    let (mut server, p) = nats().await;
+    let engine = Arc::new(WorkflowEngine::new().with_persistence(p.clone()));
+    let base = serve(engine.clone(), Some(p.clone()), ModelCheckMode::Off).await;
+    let input = r#"<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL" id="d"><message id="m" name="order"/>
+    <process id="sender" isExecutable="true"><startEvent id="ss"/><sendTask id="send" messageRef="m"/><endEvent id="se"/><sequenceFlow id="sf1" sourceRef="ss" targetRef="send"/><sequenceFlow id="sf2" sourceRef="send" targetRef="se"/></process>
+    <process id="target" isExecutable="true"><startEvent id="ts"/><intermediateCatchEvent id="receive"><messageEventDefinition messageRef="m"/></intermediateCatchEvent><userTask id="work"/><endEvent id="te"/><sequenceFlow id="tf0" sourceRef="ts" targetRef="receive"/><sequenceFlow id="tf1" sourceRef="receive" targetRef="work"/><sequenceFlow id="tf2" sourceRef="work" targetRef="te"/></process>
+    <collaboration id="c"><participant id="ps" processRef="sender"/><participant id="pt" processRef="target"/><messageFlow id="flow" sourceRef="send" targetRef="receive"/></collaboration></definitions>"#;
+    let (status, first) = deploy(&base, input).await;
+    assert_eq!(status, 200, "{first}");
+    let (status, second) = deploy(&base, input).await;
+    assert_eq!(status, 200, "{second}");
+    let source_key = first["processes"][0]["definition_key"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let target_key = first["processes"][1]["definition_key"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let newer_key = second["processes"][1]["definition_key"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let source = engine
+        .start_instance_with_variables(
+            source_key,
+            HashMap::from([
+                ("business_key".into(), json!("order-1")),
+                ("amount".into(), json!(17)),
+            ]),
+        )
+        .await
+        .unwrap();
+    let row = engine
+        .pending_internal_messages()
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(row.source_instance_id, source);
+    let p = server.restart().await;
+    let mut restored = WorkflowEngine::new().with_persistence(p.clone());
+    engine_server::StartupCoordinator::new(p.clone())
+        .restore(&mut restored, &mut HashMap::new())
+        .await
+        .unwrap();
+    let newer = restored
+        .start_instance_with_variables(
+            newer_key,
+            HashMap::from([("business_key".into(), json!("order-1"))]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(restored.pending_internal_messages().await.unwrap().len(), 1);
+    let target = restored
+        .start_instance_with_variables(
+            target_key,
+            HashMap::from([("business_key".into(), json!("order-1"))]),
+        )
+        .await
+        .unwrap();
+    assert!(
+        restored
+            .pending_internal_messages()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        restored
+            .get_instance_or_archived(target)
+            .await
+            .unwrap()
+            .variables["amount"],
+        17
+    );
+    assert!(
+        !restored
+            .get_instance_or_archived(newer)
+            .await
+            .unwrap()
+            .variables
+            .contains_key("amount")
+    );
+    let task = restored
+        .get_pending_user_tasks()
+        .into_iter()
+        .find(|t| t.instance_id == target)
+        .unwrap()
+        .task_id;
+    restored
+        .complete_user_task(task, HashMap::new())
+        .await
+        .unwrap();
+    let receipt = p.get_message_receipt(row.id).await.unwrap().unwrap();
+    assert!(
+        matches!(receipt.delivery.receiver,Some(engine_core::MessageReceiver::Catch {instance_id,..}) if instance_id==target)
+    );
+    // Simulate receiver commit/archival with a lost sender acknowledgment.
+    let mut snapshot = restored.get_instance_or_archived(source).await.unwrap();
+    snapshot
+        .event_state
+        .as_mut()
+        .unwrap()
+        .message_outbox
+        .insert(row.id, receipt.delivery);
+    p.save_instance(&snapshot).await.unwrap();
+    p.save_completed_instance(&snapshot).await.unwrap();
+    let p = server.restart().await;
+    let mut recovered = WorkflowEngine::new().with_persistence(p.clone());
+    engine_server::StartupCoordinator::new(p.clone())
+        .restore(&mut recovered, &mut HashMap::new())
+        .await
+        .unwrap();
+    assert!(
+        recovered
+            .pending_internal_messages()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        recovered
+            .get_instance_or_archived(target)
+            .await
+            .unwrap()
+            .state,
+        engine_core::InstanceState::Completed
+    );
+    assert_eq!(recovered.list_instances().await.len(), 3);
+    assert!(recovered.get_pending_user_tasks().is_empty());
+    assert_eq!(recovered.process_internal_messages().await.unwrap(), 0);
+    recovered.shutdown().await;
+    restored.shutdown().await;
+    engine.shutdown().await;
+}

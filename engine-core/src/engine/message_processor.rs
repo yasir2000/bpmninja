@@ -194,6 +194,15 @@ impl WorkflowEngine {
                 ) => Some(catch.node_id.as_str()),
                 _ => None,
             };
+            if let Some(live) = inst.event_state.as_ref().and_then(|s| {
+                s.message_boundaries
+                    .get(&format!("{}/{}", catch.token_id, catch.node_id))
+            }) && *live != catch.id
+            {
+                drop(inst);
+                self.remove_persisted_message_catch(catch.id).await;
+                return Ok(());
+            }
             if let Some(expected) = expected
                 && inst.tokens.get(&catch.token_id).is_none_or(|token| {
                     token.current_node != expected

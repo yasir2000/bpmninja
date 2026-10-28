@@ -90,7 +90,7 @@ pub enum CatchKind {
     Signal,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingMessageCatch {
     pub id: Uuid,
     pub instance_id: Uuid,

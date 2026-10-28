@@ -304,6 +304,13 @@ impl WorkflowEngine {
             if !super::event_subprocess::token_valid(&instance, token) {
                 continue;
             }
+            if let Some(live) = instance.event_state.as_ref().and_then(|s| {
+                s.message_boundaries
+                    .get(&format!("{}/{}", catch.token_id, catch.node_id))
+            }) && *live != catch.id
+            {
+                continue;
+            }
             let expected = match target.nodes.get(&catch.node_id) {
                 Some(BpmnElement::BoundaryMessageEvent { attached_to, .. }) => attached_to,
                 _ => &catch.node_id,

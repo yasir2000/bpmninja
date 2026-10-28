@@ -65,7 +65,7 @@ pub use task_handler::{IN_PROCESS_WORKER_ID, TaskHandler, TaskOutcome};
 /// The central workflow engine managing definitions, instances, and handlers.
 pub struct WorkflowEngine {
     pub(crate) message_unconfirmed: DashMap<Uuid, ()>,
-    pub(crate) message_dispatch_lock: tokio::sync::Mutex<()>,
+    pub(crate) message_dispatch_lock: tokio::sync::Mutex<usize>,
     pub(crate) message_instance_locks: persistence_ops::PersistLocks,
     pub(crate) message_receipts: DashMap<Uuid, MessageReceipt>,
     pub(crate) internal_routes:
@@ -121,7 +121,7 @@ impl WorkflowEngine {
 
         Self {
             message_unconfirmed: DashMap::new(),
-            message_dispatch_lock: tokio::sync::Mutex::new(()),
+            message_dispatch_lock: tokio::sync::Mutex::new(0),
             message_instance_locks: persistence_ops::PersistLocks::new(),
             message_receipts: DashMap::new(),
             internal_routes: std::sync::RwLock::new(std::collections::HashMap::new()),
