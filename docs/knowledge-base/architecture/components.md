@@ -91,7 +91,7 @@ source collection, target definition/version/element and exact business key.
 **Key files:** `domain/collaboration.rs`, `engine/message_routing.rs`.
 **Contract:** Explicit outgoing flows fan out in document order; each has a start,
 exact catch identity or explicit unavailable/ambiguous result. Planning reserves
-and consumes nothing. Automatic sends require durable outbox and receiver claims.
+and consumes nothing. Automatic sends use durable outbox records, receiver snapshot commits and permanent receipts.
 See the [X12 contract](../../x12-collaboration-plan.md).
 
 ### Executor (engine-core/src/engine/executor/)
@@ -135,3 +135,5 @@ See the [X12 contract](../../x12-collaboration-plan.md).
 
 ### external-task-client
 **Owns:** TypeScript worker SDK — long polling, lock management, retry, graceful shutdown.
+
+For the implemented commit/recovery protocol, see [durable internal messages](../../internal-message-delivery.md).

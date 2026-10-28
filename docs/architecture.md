@@ -1,7 +1,7 @@
 # bpmninja — Architecture Documentation
 
 > BPMN 2.0 workflow engine in Rust, token-based execution
-> As of: 2026-10-27 (collection deployment and routing preflight; v0.7.24)
+> As of: 2026-10-28 (durable internal message delivery; v0.7.24)
 
 ---
 
@@ -75,7 +75,7 @@ graph TB
             BOUND["boundary.rs"]
             OPS["definition_ops / instance_ops /<br/>process_start / user_task / service_task"]
             PROC["timer_processor / message_processor"]
-            ROUTES["message_routing.rs<br/>pinned routes + read-only receiver plans"]
+            ROUTES["message_routing.rs / message_delivery.rs<br/>pinned plans + durable outbox/inbox"]
             IDX["topic_index / timer_index<br/>(secondary indexes)"]
             STORE["registry.rs / instance_store.rs"]
             PERSIST["persistence_ops.rs + retry_queue.rs"]
@@ -389,6 +389,7 @@ The authoritative signatures are in [port/persistence.rs](../engine-core/src/por
 |---|---|---|---|
 | `definitions` | KV | Individually persisted legacy process definitions | `{definition_uuid}` |
 | `definition_collections` | KV | Complete batch commit: definitions, XML, metadata and deletion tombstones | `{collection_uuid}` |
+| `message_receipts` | KV | Permanent targeted receiver deduplication receipts | `{delivery_uuid}` |
 | `conditional_starts` | KV | Durable explicit conditional-start receipts | `{request_uuid}` |
 | `instance_audit` / `instance_states` | KV | Detached audit snapshots and checkpoint/delta records when configured | Content-addressed / instance state keys |
 | `instances` | KV | Active `ProcessInstance` (JSON) | `{instance_uuid}` |
@@ -475,9 +476,34 @@ There is no latest-version or name-based fallback.
 
 Preflight creates no instances, consumes no catches and reserves no receivers.
 Public `correlate_message` retains its separate broadcast behavior. Automatic
-internal sends await durable sender outbox records, occurrence identities,
-receiver claims/deduplication and crash-point recovery. See the
+internal sends use the durable protocol in the following section. See the
 [X12 contract](x12-collaboration-plan.md) for current limits and remaining gates.
+
+---
+
+### 5.6 Durable Internal Delivery
+
+Routed sends save their continuation and every outgoing flow's outbox record in
+one instance snapshot. Each token has a monotonic message execution revision;
+each flow delivery has its own UUID. Dispatch persists an exact receiver binding,
+then commits receiver payload effects, end callbacks, inbox receipt, job cleanup
+identities and continuation in another required snapshot save. A permanent
+`message_receipts` entry is retained before acknowledging/removing the sender row.
+Temporary inbox payload copies are pruned only after that permanent bridge exists.
+
+Recovery reads active and archived senders, and checks receiver snapshots, archives
+and permanent receipts. It runs on startup, after batches and through the server
+scheduler. Concurrent dispatchers coalesce; bounded passes rotate for fairness.
+Gateway siblings are removed by job ID. Non-interrupting boundaries rearm with a
+live occurrence marker; completing the original activity clears that marker.
+
+These guarantees assume one engine writer per store. Pending discovery currently
+scans snapshots; a dedicated durable pending index is a scaling follow-up. Unavailable
+or ambiguous receivers retain their outbox records. Sender deletion with pending
+outbox records is rejected. This protocol guarantees the committed receive effect;
+it does not make arbitrary external worker side effects exactly-once. Full details
+and remaining client/administration work are in the
+[delivery contract](internal-message-delivery.md).
 
 ---
 

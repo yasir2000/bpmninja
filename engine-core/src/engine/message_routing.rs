@@ -233,21 +233,9 @@ impl WorkflowEngine {
             .collect();
         let mut plans = Vec::new();
         for route in routes {
-            let receiver = match self.definitions.get(&route.target.definition_key) {
-                None => PlannedMessageReceiver::Unavailable(ReceiverUnavailable::DefinitionDeleted),
-                Some(target)
-                    if matches!(
-                        target.nodes.get(&route.target.element_id),
-                        Some(BpmnElement::MessageStartEvent { .. })
-                    ) =>
-                {
-                    PlannedMessageReceiver::Start
-                }
-                Some(target) => {
-                    self.select_message_receiver(&route, &target, business_key)
-                        .await
-                }
-            };
+            let receiver = self
+                .plan_pinned_message_receiver(&route, business_key)
+                .await;
             plans.push(InternalMessagePlan {
                 route,
                 business_key: business_key.into(),
@@ -256,6 +244,29 @@ impl WorkflowEngine {
             });
         }
         Ok(plans)
+    }
+    /// A committed outbox keeps its historical route even if the sender later
+    /// migrates or its old definition is deleted. Only the target must be live.
+    pub(super) async fn plan_pinned_message_receiver(
+        &self,
+        route: &PinnedMessageRoute,
+        business_key: &str,
+    ) -> PlannedMessageReceiver {
+        match self.definitions.get(&route.target.definition_key) {
+            None => PlannedMessageReceiver::Unavailable(ReceiverUnavailable::DefinitionDeleted),
+            Some(target)
+                if matches!(
+                    target.nodes.get(&route.target.element_id),
+                    Some(BpmnElement::MessageStartEvent { .. })
+                ) =>
+            {
+                PlannedMessageReceiver::Start
+            }
+            Some(target) => {
+                self.select_message_receiver(route, &target, business_key)
+                    .await
+            }
+        }
     }
     async fn select_message_receiver(
         &self,

@@ -71,7 +71,7 @@ Other pools/versions, signals and stale/inactive occurrences are excluded.
 
 The supplied payload is a snapshot per flow; planning changes no sender or
 receiver state. Plans are not reservations. Public message-name correlation
-remains separate; durable delivery and automatic internal sends are pending.
+remains separate; durable delivery is handled by the separate outbox/inbox protocol.
 See [the X12 contract](../../x12-collaboration-plan.md).
 
 ## 2. Instance Execution Flow
@@ -270,3 +270,5 @@ sequenceDiagram
         end
     end
 ```
+
+For the implemented commit/recovery protocol, see [durable internal messages](../../internal-message-delivery.md).

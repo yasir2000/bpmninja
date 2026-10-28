@@ -153,8 +153,10 @@ keys/versions during deployment and startup recovery.
   idempotency key or cross-replica version coordinator is provided.
 - Restore validates metadata, preserves identities/version gaps and skips tombstones.
 - `plan_internal_messages` returns observations, not receiver reservations.
-- Automatic sends remain gated on durable sender occurrences/outbox records,
-  receiver claims/deduplication and crash recovery.
+- Automatic sends use durable sender occurrences/outbox records, receiver
+  snapshot commits, permanent receipts and startup/scheduler recovery.
 
 See [X12](../../x12-collaboration-plan.md) and the
 [architecture deployment/recovery sections](../../architecture.md#54-collection-commit-and-recovery).
+
+For the implemented commit/recovery protocol, see [durable internal messages](../../internal-message-delivery.md).

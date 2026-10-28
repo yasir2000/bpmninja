@@ -509,3 +509,84 @@ async fn noninterrupting_boundary_rearms_without_cancelling_the_original_activit
         InstanceState::Completed
     );
 }
+
+#[tokio::test]
+async fn malformed_or_future_outbox_records_fail_closed() {
+    let engine = WorkflowEngine::new();
+    let batch = deploy(&engine, receiver(true)).await;
+    let dispatch = engine.message_dispatch_lock.lock().await;
+    let source = wait(&engine, key(&batch, "sender"), "order-1").await;
+    let row = engine
+        .pending_internal_messages()
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let instance = engine.instances.get(&source).await.unwrap();
+    {
+        let mut snapshot = instance.write().await;
+        snapshot
+            .event_state
+            .as_mut()
+            .unwrap()
+            .message_outbox
+            .get_mut(&row.id)
+            .unwrap()
+            .version = 2;
+    }
+    drop(dispatch);
+    assert!(engine.process_internal_messages().await.is_err());
+    assert!(engine.pending_user_tasks.is_empty());
+}
+
+#[tokio::test]
+async fn committed_outbox_survives_sender_migration_and_old_definition_deletion() {
+    let engine = WorkflowEngine::new();
+    let mut source = sender();
+    source
+        .nodes
+        .insert("after".into(), BpmnElement::UserTask("sender".into()));
+    source.flows.get_mut("send").unwrap()[0].target = "after".into();
+    source
+        .flows
+        .insert("after".into(), vec![crate::SequenceFlow::simple("e")]);
+    let old = engine
+        .deploy_collection(
+            vec![source.clone(), receiver(true)],
+            "xml".into(),
+            metadata(),
+        )
+        .await
+        .unwrap();
+    let new = engine
+        .deploy_collection(vec![source, receiver(true)], "xml".into(), metadata())
+        .await
+        .unwrap();
+    let dispatch = engine.message_dispatch_lock.lock().await;
+    let source = wait(&engine, key(&old, "sender"), "order-1").await;
+    let delivery = engine
+        .pending_internal_messages()
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    engine
+        .migrate_instance(source, key(&new, "sender"), HashMap::new())
+        .await
+        .unwrap();
+    engine
+        .delete_definition(key(&old, "sender"), false)
+        .await
+        .unwrap();
+    drop(dispatch);
+    assert_eq!(engine.process_internal_messages().await.unwrap(), 1);
+    assert_eq!(
+        engine
+            .get_instance_or_archived(delivery.id)
+            .await
+            .unwrap()
+            .definition_key,
+        key(&old, "receiver")
+    );
+    assert!(engine.pending_internal_messages().await.unwrap().is_empty());
+}

@@ -81,7 +81,7 @@ writer per store; version allocation is not coordinated across server replicas.
 A lost request/commit acknowledgment can leave a committed batch absent from
 the running engine until restart; inspect definitions after recovery before
 retrying. Collection deployment has no client idempotency key. Automatic internal
-message delivery is still disabled; routing and durable delivery remain below.
+message delivery now uses the durable protocol described below.
 
 The recovery tests require `nats-server` on PATH and use isolated temporary
 JetStream stores; CI installs the executable from its running NATS image.
@@ -141,12 +141,11 @@ is deliberately separate from public `correlate_message` broadcasts. Its contrac
 
 Plans are observations, not reservations or durable deliveries. Receiver state
 can change after preflight. No subscriptions are consumed, instances started,
-sender variables mutated, or messages automatically sent. The next increment
-must persist the sender outbox and claim/revalidate exact receiver occurrences
-with durable deduplication. Every sender execution needs a distinct durable
-occurrence identity, including sequence-flow revisits of the same send node.
-It must retain unavailable deliveries and avoid partially dispatching a fan-out
-solely on a preflight result.
+sender variables mutated, or messages automatically sent. The durable delivery path described below persists the sender outbox and claims
+exact receiver occurrences separately from preflight. Every sender execution has
+a distinct durable occurrence identity, including sequence-flow revisits of the
+same send node. Fan-out records commit together; receivers are delivered
+independently and unavailable deliveries remain pending.
 
 Routing verification (2026-10-27): **545 tests passed**: 410 engine-core,
 99 parser, 29 server library and seven collection integration tests. The eight
@@ -162,20 +161,32 @@ persistence-nats and engine-server. TypeSpec compilation, formatting, diff check
 and AST-only graphify update passed. No REST schema change was needed for this
 engine-only preflight API.
 
+## Durable outbox and receiver deduplication (2026-10-28)
+
+Routed send tasks now commit their next token and all flow delivery records in a
+single required instance snapshot save. The worker binds exact receiver identities
+before receiving, commits receiver effects/inbox/continuation together, retains a
+permanent deduplication receipt, then acknowledges the source. Failed writes retain
+stable identities and block work exposure until the required save succeeds.
+
+Starts, ordinary catches, event-gateway alternatives and message boundaries use
+targeted delivery. Non-interrupting boundaries rearm with occurrence fencing;
+interrupting branches clean up exact sibling jobs. Archives participate in recovery.
+Committed sends keep their old route through sender migration or definition deletion.
+Default adapters without receipt support fail closed. Startup and the timer
+scheduler reconcile pending records; automatic dispatch also follows execution batches.
+
+The [durable messaging contract](internal-message-delivery.md) defines commit
+boundaries, retry behavior, snapshot/receipt retention and current operational limits.
+
 ## Remaining implementation
 
-1. Participant/message-flow parsing and collection deployment are implemented
-   within the contracts above. Expand batch size/idempotency and multi-writer
-   support separately if required.
-2. Route compilation and receiver preflight are implemented above. Connect these
-   version-pinned plans to durable delivery; actual targeted catch/start execution
-   remains gated on the delivery records and receiver claims below.
-3. Use durable delivery records and receiver deduplication before enabling
-   automatic sends. Recovery must cover sender commit before delivery, receiver
-   commit before acknowledgment, repeated recovery, and archived receivers.
-4. Update deployment clients, modeler workflows, examples,
-   history/SSE, and user-facing limitations for automatic routing together.
-   Collection REST types, OpenAPI and a request example are already updated.
+1. Parser, collection commit, route preflight, durable outbox and targeted receiver
+   commits are implemented. Keep their failure/recovery coverage in the acceptance gates.
+2. Add deployment/delivery queue clients and modeler workflows, explicit pending
+   delivery administration, dedicated history/SSE payloads and roundtrip tests.
+3. Add a durable pending index and deployment idempotency/larger-batch support if
+   required. Multi-writer coordination remains a separate design task.
 
 ## Acceptance
 

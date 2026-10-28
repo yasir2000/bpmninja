@@ -31,6 +31,8 @@ impl MessageReceiver {
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MessageDelivery {
+    #[serde(default = "message_protocol_version")]
+    pub version: u32,
     pub id: Uuid,
     pub source_instance_id: Uuid,
     pub source_token_id: Uuid,
@@ -40,6 +42,10 @@ pub struct MessageDelivery {
     pub variables: HashMap<String, Value>,
     pub receiver: Option<MessageReceiver>,
 }
+fn message_protocol_version() -> u32 {
+    1
+}
+
 impl MessageDelivery {
     fn same_message(&self, other: &Self) -> bool {
         let mut left = self.clone();
@@ -170,6 +176,7 @@ impl WorkflowEngine {
         let state = candidate.event_state.as_mut().unwrap();
         for route in routes {
             let delivery = MessageDelivery {
+                version: 1,
                 id: Uuid::new_v4(),
                 source_instance_id: id,
                 source_token_id: next.id,
@@ -244,16 +251,24 @@ impl WorkflowEngine {
         Ok(snapshots)
     }
     pub async fn pending_internal_messages(&self) -> EngineResult<Vec<MessageDelivery>> {
-        let mut messages: Vec<_> = self
-            .message_catalog()
-            .await?
-            .into_values()
-            .flat_map(|s| {
-                s.event_state
-                    .into_iter()
-                    .flat_map(|state| state.message_outbox.into_values())
-            })
-            .collect();
+        let mut messages = Vec::new();
+        for snapshot in self.message_catalog().await?.into_values() {
+            if let Some(state) = snapshot.event_state {
+                for (id, row) in state.message_outbox {
+                    if id != row.id
+                        || row.id.is_nil()
+                        || row.source_instance_id != snapshot.id
+                        || row.source_revision == 0
+                        || row.version != 1
+                    {
+                        return Err(EngineError::PersistenceError(
+                            "Invalid or unsupported internal message outbox record".into(),
+                        ));
+                    }
+                    messages.push(row);
+                }
+            }
+        }
         messages.sort_by_key(|message| {
             (
                 message.source_instance_id,
@@ -840,21 +855,23 @@ impl WorkflowEngine {
                         }
                         return Ok(true);
                     }
+                    if !self
+                        .internal_routes
+                        .read()
+                        .unwrap()
+                        .get(&delivery.route.source.definition_key)
+                        .is_some_and(|routes| routes.contains(&delivery.route))
+                    {
+                        return Err(EngineError::PersistenceError(
+                            "Internal delivery route does not match its committed collection"
+                                .into(),
+                        ));
+                    }
                     if delivery.receiver.is_none() {
-                        let plans = self
-                            .plan_internal_messages(
-                                delivery.route.source.definition_key,
-                                &delivery.route.source.element_id,
-                                &delivery.business_key,
-                                delivery.variables.clone(),
-                            )
-                            .await?;
-                        let Some(plan) =
-                            plans.into_iter().find(|plan| plan.route == delivery.route)
-                        else {
-                            return Ok(false);
-                        };
-                        let receiver = match plan.receiver {
+                        let planned = self
+                            .plan_pinned_message_receiver(&delivery.route, &delivery.business_key)
+                            .await;
+                        let receiver = match planned {
                             PlannedMessageReceiver::Start => MessageReceiver::Start {
                                 instance_id: delivery.id,
                             },

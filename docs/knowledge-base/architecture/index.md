@@ -24,4 +24,6 @@ Core architectural documentation for BPMNinja.
 The [main architecture document](../../architecture.md) describes atomic
 collection publication and recovery. The [X12 contract](../../x12-collaboration-plan.md)
 tracks version-pinned receiver preflight and the remaining durable delivery gates.
-Preflight is an engine API; automatic internal message delivery is not enabled.
+Preflight is an engine API; automatic internal message delivery uses durable outbox/inbox commits and permanent receipts.
+
+For the implemented commit/recovery protocol, see [durable internal messages](../../internal-message-delivery.md).

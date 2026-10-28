@@ -45,7 +45,7 @@ bpmninja is a BPMN 2.0 engine with the following core features:
 - **Fail-closed durability** — `REQUIRE_NATS` defaults to true (also docker-compose) and refuses silent in-memory fallback; `/api/ready` mirrors persistence health
 - **Deploy-time model checking** — every deployed model is checked for deadlocks, livelocks, unsafe parallelism and dead activities with [rust_bpmn_analyzer](https://github.com/timKraeuter/rust_bpmn_analyzer) (partial order reduction); `MODEL_CHECK=warn` reports findings in the deploy response, `enforce` rejects the deploy
 - **Collection deployment** — validate and model-check every executable pool, then persist and publish the complete batch; restore exact definition keys and versions after restart
-- **Version-pinned routing preflight** — read-only engine API selects the exact pool, element and business key; reports unavailable or ambiguous receivers. Durable delivery and automatic internal sends are still pending
+- **Version-pinned routing preflight** — read-only engine API selects the exact pool, element and business key; reports unavailable or ambiguous receivers. Routed sends use a durable outbox, targeted receiver commits and permanent deduplication receipts
 - **Upload limits** — multipart instance files capped via `MAX_UPLOAD_BYTES` (default 5 MiB → HTTP 413)
 - **Event-driven timer scheduler** — sleeps until the next timer is due (or a new timer is added) instead of polling; `TIMER_INTERVAL_MS` caps the idle wait
 - **Camunda-compatible service tasks** — fetch-and-lock pattern with long polling; waiting workers are woken the moment a task becomes available
@@ -116,7 +116,7 @@ See the [element matrix](docs/knowledge-base/modules/bpmn-parser/element-matrix.
 | <img src="readme-assets/bpmn-icons/user-task.svg" width="34"> | **UserTask** | Creates a pending task that must be completed externally. Assignee comes from `data-assignee`, then `camunda:assignee` (fallback `"unassigned"`). |
 | <img src="readme-assets/bpmn-icons/service-task.svg" width="34"> | **ServiceTask** | External processing via fetch-and-lock pattern (Camunda-compatible). Topic comes from `data-topic`, then `data-handler`, then `camunda:topic`, then the node id. |
 | <img src="readme-assets/bpmn-icons/script-task.svg" width="34"> | **ScriptTask** | Executes inline scripts via the Rhai engine. |
-| <img src="readme-assets/bpmn-icons/send-task.svg" width="34"> | **SendTask** | Records the send and continues; automatic internal delivery is pending durable outbox and receiver deduplication. |
+| <img src="readme-assets/bpmn-icons/send-task.svg" width="34"> | **SendTask** | Explicit internal routes commit a durable outbox and deliver to the pinned receiver; unrouted sends retain legacy logging behavior. |
 
 ### Gateways
 
@@ -181,7 +181,7 @@ For performance and architectural reasons (keep it simple), bpmninja deviates fr
 - **Inclusive Gateway join:** Split follows BPMN OR (every outgoing flow whose condition is true). Join waits for taken paths: `expected_count` is the matching split's taken branch count (via `find_downstream_join`). Unstructured joins without a matching split fall back to AND-style `incoming_flow_count`.
 - **Camunda assignee/topic attributes:** User tasks read `data-assignee` first, then `camunda:assignee` (quick-xml strips the prefix to `@assignee`; fallback `"unassigned"`). Service tasks read `data-topic`, then `data-handler`, then `camunda:topic` (`@topic`), then the node id.
 - **Task type mapping:** Message-backed `receiveTask` elements compile to message catches, or message starts when instantiating. `manualTask` maps to a user task; a `businessRuleTask` requires an explicit service topic. Generic tasks, empty scripts and catches without a supported trigger are rejected. There is no DMN engine for business-rule tasks.
-- **Process selection:** `/api/deploy` deploys the first explicitly executable process, with a first-process fallback. `/api/deploy/collection` atomically deploys all explicitly executable pools and returns a result per pool. It stores collaboration metadata; automatic internal message routing is not enabled. Collection persistence requires a record that fits the NATS message payload limit. See [X12 deployment and recovery](docs/x12-collaboration-plan.md).
+- **Process selection:** `/api/deploy` deploys the first explicitly executable process, with a first-process fallback. `/api/deploy/collection` atomically deploys all explicitly executable pools and returns a result per pool. It stores collaboration metadata and supports durable, targeted internal message delivery. Collection persistence requires a record that fits the NATS message payload limit. See [X12 deployment and recovery](docs/x12-collaboration-plan.md).
 
 ### Currently Unsupported BPMN Elements
 
@@ -248,7 +248,7 @@ flowchart TD
 | Durable collection record | `definition_collections` KV stores definitions, original XML, collaboration metadata and deletion tombstones |
 | Startup recovery | Restores exact keys/versions and reconstructs pinned routes before restoring instances and wait states; invalid collection records fail startup |
 | Internal routing preflight | Engine-only `plan_internal_messages` API; exact business key, pool version and catch/start element; no receiver mutation |
-| Automatic internal sends | Pending durable sender outbox, receiver claims and deduplication; preflight is an observation, not a reservation |
+| Automatic internal sends | Durable outbox + targeted receiver snapshot commit + permanent receipt; startup and timer recovery retry pending records |
 
 Collection commits must fit the NATS message payload limit, even when XML fits
 the HTTP limit. Deployments assume one engine writer per store. After a lost
@@ -263,6 +263,13 @@ curl -X POST http://localhost:8081/api/deploy/collection \
   -H 'Content-Type: application/json' \
   --data @docs/examples/x12-collection.json
 ```
+
+Internal deliveries require exact nonempty business keys. Missing or ambiguous
+receivers remain pending; committed receiver bindings are not silently redirected.
+Sender deletion is blocked while its outbox is pending. Permanent receipts protect
+retries after receiver archival/deletion. Pending discovery currently scans active
+and archived snapshots; queue administration and desktop delivery views are still
+pending. See the [durable delivery contract](docs/internal-message-delivery.md).
 
 See the [X12 implementation contract](docs/x12-collaboration-plan.md) for routing,
 correlation, recovery semantics and remaining work.
@@ -720,7 +727,7 @@ Sanitizers (AddressSanitizer) are enabled by default and will cause a structured
 | Multi-arch Docker images (amd64 + arm64) | ✅ Implemented |
 | Executable pool collection deployment and atomic persistence | ✅ Implemented |
 | Version-pinned internal route compilation and receiver preflight | ✅ Implemented (engine API) |
-| Durable internal delivery, receiver deduplication and automatic sends | 🔲 Pending — see [X12](docs/x12-collaboration-plan.md) |
+| Durable internal delivery, receiver deduplication and automatic routed sends | ✅ Implemented — see [delivery contract](docs/internal-message-delivery.md) |
 | Collection deployment in desktop/modeler clients | 🔲 Pending |
 | Batch operations on instances | 🔲 Planned |
 | Process instance migration (`POST /api/instances/:id/migrate`) | ✅ Implemented |
