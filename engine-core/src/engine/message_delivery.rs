@@ -526,6 +526,8 @@ impl WorkflowEngine {
                 .insert(delivery.id, inbox);
             self.encode_checked_instance(&snapshot)?;
             self.instances.insert(id, snapshot).await;
+            metrics::counter!("bpmn_instance_started_total").increment(1);
+            metrics::gauge!("bpmn_active_instances").increment(1.0);
         }
         let instance = self
             .instances
@@ -661,6 +663,8 @@ impl WorkflowEngine {
             ..Default::default()
         };
         if interrupt {
+            let mut closed = original.clone();
+            Self::close_conditional_boundaries(&mut candidate, &mut closed);
             candidate.tokens.remove(token_id);
             for active in &mut candidate.active_tokens {
                 if active.token.id == *token_id {
@@ -708,6 +712,18 @@ impl WorkflowEngine {
                 .message_boundaries
                 .retain(|key, _| !key.starts_with(&format!("{token_id}/")));
         } else if let Some((attached_to, _)) = &boundary {
+            // The original activity must merge its later outputs against its
+            // original baseline, rather than overwrite incoming message effects.
+            if let Some(kept) = candidate.tokens.get_mut(token_id)
+                && kept.event_context.is_none()
+            {
+                kept.event_context = Some(Box::new(crate::domain::token::EventContext {
+                    generation: state.generation,
+                    activation: None,
+                    started_node: Some(kept.current_node.clone()),
+                    baseline: kept.process_variables(),
+                }));
+            }
             let mut rearm = catch.clone();
             rearm.id = Uuid::new_v4();
             state

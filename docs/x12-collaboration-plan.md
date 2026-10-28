@@ -141,7 +141,8 @@ is deliberately separate from public `correlate_message` broadcasts. Its contrac
 
 Plans are observations, not reservations or durable deliveries. Receiver state
 can change after preflight. No subscriptions are consumed, instances started,
-sender variables mutated, or messages automatically sent. The durable delivery path described below persists the sender outbox and claims
+sender variables mutated, or messages automatically sent by preflight. The durable
+delivery path described below persists the sender outbox and claims
 exact receiver occurrences separately from preflight. Every sender execution has
 a distinct durable occurrence identity, including sequence-flow revisits of the
 same send node. Fan-out records commit together; receivers are delivered
@@ -200,7 +201,7 @@ unrelated-pool delivery; concurrent/retried delivery and crash-point recovery;
 REST/client contract and modeler roundtrip tests. Run affected Rust/frontend
 suites, formatting, strict Clippy, TypeSpec compilation and graphify update.
 
-X12 remains open until deployment, routing and durable recovery pass acceptance.
+X12 remains open until delivery, client/modeler workflows and recovery/roundtrip acceptance all pass.
 
 Parser verification: `cargo test -p bpmn-parser` passed all 91 tests, including
 four new collaboration tests. `cargo fmt --all --check` and `git diff --check`

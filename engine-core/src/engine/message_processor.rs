@@ -214,7 +214,13 @@ impl WorkflowEngine {
                 return Ok(());
             }
             if let Some(source) = inst.tokens.get(&catch.token_id)
-                && expected.is_some()
+                && matches!(
+                    def.nodes.get(&catch.node_id),
+                    Some(
+                        crate::BpmnElement::BoundaryMessageEvent { .. }
+                            | crate::BpmnElement::BoundarySignalEvent { .. }
+                    )
+                )
                 && source.boundary_activation.is_some()
             {
                 let activation = inst

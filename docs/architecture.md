@@ -166,6 +166,7 @@ classDiagram
         +String current_node
         +HashMap~String, Value~ variables
         +bool is_merged
+        +u64 message_revision
     }
 
     class ActiveToken {
@@ -686,6 +687,8 @@ graph TD
 
 ```
 WorkflowEngine (Arc)
+├── message_dispatch_lock   → tokio::sync::Mutex<usize>        (coalesced dispatch + fairness cursor)
+├── message_instance_locks  → striped async locks             (send/receive/delete transactions)
 ├── deployment_lock         → tokio::sync::Mutex<()>         (deploy/delete/version allocation)
 ├── DefinitionRegistry       → Arc<std::sync::RwLock<HashMap>> (atomic collection publication)
 ├── internal_routes          → std::sync::RwLock<HashMap>      (source-key route index)

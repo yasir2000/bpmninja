@@ -503,6 +503,14 @@ async fn noninterrupting_boundary_rearms_without_cancelling_the_original_activit
         .complete_user_task(original, HashMap::new())
         .await
         .unwrap();
+    assert_eq!(
+        engine
+            .get_instance_or_archived(target)
+            .await
+            .unwrap()
+            .variables["received"],
+        2
+    );
     assert!(engine.pending_message_catches.is_empty());
     assert_eq!(
         engine.get_instance_or_archived(target).await.unwrap().state,
@@ -589,4 +597,87 @@ async fn committed_outbox_survives_sender_migration_and_old_definition_deletion(
         key(&old, "receiver")
     );
     assert!(engine.pending_internal_messages().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn delivered_receive_completion_closes_conditionals_before_payload_evaluation() {
+    let engine = WorkflowEngine::new();
+    let mut target = receiver(false);
+    target.variable_defaults.insert("flag".into(), json!(false));
+    target.nodes.insert(
+        "conditional".into(),
+        BpmnElement::BoundaryConditionalEvent {
+            order: 0,
+            attached_to: "receive".into(),
+            condition: "flag".into(),
+            cancel_activity: true,
+        },
+    );
+    target
+        .nodes
+        .insert("branch".into(), BpmnElement::UserTask("unexpected".into()));
+    target.flows.insert(
+        "conditional".into(),
+        vec![crate::SequenceFlow::simple("branch")],
+    );
+    target
+        .flows
+        .insert("branch".into(), vec![crate::SequenceFlow::simple("e")]);
+    let batch = deploy(&engine, target).await;
+    let target = wait(&engine, key(&batch, "receiver"), "order-1").await;
+    assert_eq!(engine.get_pending_conditional_catches().await.len(), 1);
+    engine
+        .start_instance_with_variables(
+            key(&batch, "sender"),
+            HashMap::from([
+                ("business_key".into(), json!("order-1")),
+                ("flag".into(), json!(true)),
+            ]),
+        )
+        .await
+        .unwrap();
+    assert!(engine.get_pending_conditional_catches().await.is_empty());
+    assert!(
+        engine
+            .get_pending_user_tasks()
+            .iter()
+            .any(|task| task.instance_id == target && task.node_id == "work")
+    );
+    assert!(
+        !engine
+            .get_pending_user_tasks()
+            .iter()
+            .any(|task| task.node_id == "branch")
+    );
+    assert_eq!(
+        engine
+            .get_instance_or_archived(target)
+            .await
+            .unwrap()
+            .variables["flag"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn receiver_deletion_confirms_an_unacknowledged_snapshot_before_retaining_its_receipt() {
+    let p = persistence();
+    let engine = WorkflowEngine::new().with_persistence(p.clone());
+    let batch = deploy(&engine, counting_receiver(true)).await;
+    p.inbox_failures.store(1, Ordering::SeqCst);
+    wait(&engine, key(&batch, "sender"), "order-1").await;
+    let row = engine
+        .pending_internal_messages()
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(p.get_active_instance(row.id).await.unwrap().is_none());
+    assert!(p.get_message_receipt(row.id).await.unwrap().is_none());
+    engine.delete_instance(row.id).await.unwrap();
+    assert!(p.get_message_receipt(row.id).await.unwrap().is_some());
+    assert_eq!(engine.process_internal_messages().await.unwrap(), 1);
+    assert!(engine.get_instance_or_archived(row.id).await.is_err());
+    assert!(engine.pending_user_tasks.is_empty());
+    engine.shutdown().await;
 }

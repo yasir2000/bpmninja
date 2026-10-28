@@ -1,6 +1,6 @@
 # BPMN 2.0.2 Element Matrix
 
-Status of every BPMN 2.0.2 element in BPMNinja (v0.7.24, updated 2026-10-16). Derived from `bpmn-parser/src/parser.rs` (mapping + `reject_unsupported_elements`) and `engine-core`.
+Status of every BPMN 2.0.2 element in BPMNinja (v0.7.24, updated 2026-10-28). Derived from `bpmn-parser/src/parser.rs` (mapping + `reject_unsupported_elements`) and `engine-core`.
 
 | Symbol | Meaning |
 |---|---|
@@ -9,14 +9,14 @@ Status of every BPMN 2.0.2 element in BPMNinja (v0.7.24, updated 2026-10-16). De
 | ❌ | **Rejected at deploy** with `InvalidDefinition` naming the element — backlog item in brackets |
 | ⚠️ | **Partial** — implemented subset or non-standard modelling form (see notes) |
 
-Only the deployed process is checked (first `isExecutable="true"` process, else the first process). Elements of other pools are ignored.
+The legacy endpoint checks its selected process (first explicitly executable process, otherwise the first process). Collection deployment validates all explicitly executable top-level pools and their internal collaboration routes.
 
 ## Flow Objects — Events
 
 | Element | Start | Intermediate catch | Intermediate throw | Boundary | End |
 |---|---|---|---|---|---|
 | None | ✅ | — | ❌ (milestone not executed) | — | ✅ |
-| Message | ✅ | ✅ | ✅ (as send) | ✅ interrupting / non-interrupting | ❌ [X1/X12] |
+| Message | ✅ | ✅ | ⚠️ as routed send | ✅ interrupting / non-interrupting | ❌ [X1/X12] |
 | Timer (duration, date, cycle) | ✅ | ✅ | — | ✅ interrupting / non-interrupting | — |
 | Error | ✅ interrupting, process-level event sub-process [X9a] | — | — | ✅ | ✅ |
 | Escalation | ✅ process-level event sub-process [X9a] | — | ✅ | ✅ | ✅ |
@@ -35,7 +35,7 @@ Only the deployed process is checked (first `isExecutable="true"` process, else 
 | User Task | ✅ | Assignee from `data-assignee` / `camunda:assignee` |
 | Service Task | ✅ | External task (fetch-and-lock); topic from `data-topic` / `camunda:topic` |
 | Script Task | ✅ | Rhai |
-| Send Task | ✅ | Throws a message, continues |
+| Send Task | ⚠️ | Explicit internal collection routes use durable outbox/inbox commits and permanent receiver receipts. Unrouted sends retain legacy logging; external transport is not implemented. [Delivery contract](../../../internal-message-delivery.md) |
 | Receive Task | ✅ | As message catch; `instantiate="true"` ✅ as message start (no incoming flows, top-level process only) |
 | Manual Task | ✅ | As user task |
 | Business Rule Task | ✅ / ❌ | With topic → external task; without topic ❌ (no DMN) [X14] |
@@ -65,7 +65,7 @@ Only the deployed process is checked (first `isExecutable="true"` process, else 
 | Element | Status | Notes |
 |---|---|---|
 | Sequence flow | ✅ | Conditional and default flows |
-| Message flow | 🟡 | Between pools; only one process is deployed [X12] |
+| Message flow | ⚠️ | Durable targeted delivery for validated top-level internal collection routes; exact definition/version, element and business key. Nested, loop, black-box/external routes remain unsupported. [X12](../../../x12-collaboration-plan.md) |
 | Association | 🟡 | Compensation associations not yet interpreted [G1] |
 | Data association (input / output) | ⚠️ | One source/target; process data ↔ task IO/property; dangling references, assignments, transformations rejected. [Contract](../../../data-mappings.md) |
 
@@ -73,7 +73,7 @@ Only the deployed process is checked (first `isExecutable="true"` process, else 
 
 | Element | Status | Notes |
 |---|---|---|
-| Pool (participant) | 🟡 | One executable process per deployment [X12] |
+| Pool (participant) | ⚠️ | Collection deployment atomically deploys all explicitly executable pools and retains participant metadata. Black-box pools are metadata-only; desktop deployment still uses the legacy single-process path [X12]. |
 | Lane / lane set | 🟡 | Kept on export (original XML is stored verbatim). Lane → candidate group needs candidate groups on user tasks [X16] |
 
 ## Artifacts

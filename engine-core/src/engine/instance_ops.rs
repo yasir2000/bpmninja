@@ -847,6 +847,12 @@ impl WorkflowEngine {
     /// Deletes a process instance and cleans up associated pending tasks.
     pub async fn delete_instance(&self, instance_id: Uuid) -> EngineResult<()> {
         let _message_step = self.message_instance_locks.lock(instance_id).await;
+        // A failed receive save may leave a stable candidate in memory. Never
+        // promote its inbox to a permanent receipt until its snapshot commits.
+        if self.message_unconfirmed.contains_key(&instance_id) {
+            self.persist_instance_required(instance_id).await?;
+            self.message_unconfirmed.remove(&instance_id);
+        }
         if let Some(instance) = self.instances.get(&instance_id).await {
             let snapshot = instance.read().await.clone();
             self.retain_instance_message_receipts(&snapshot).await?;

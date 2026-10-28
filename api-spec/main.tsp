@@ -342,7 +342,7 @@ namespace Api {
   @post @route("/deploy")
   op deploy(@body request: DeployRequest): DeployResponse | AppError;
 
-  @doc("Deploy all explicitly executable top-level processes atomically. Validates every pool and checks each model before publishing. Persists version-pinned metadata; automatic internal message delivery is not enabled. Persisted record size is subject to the NATS maximum payload. A lost response may have committed; inspect definitions before retrying.")
+  @doc("Deploy all explicitly executable top-level processes atomically. Validates every pool and checks each model before publishing. Persists version-pinned metadata. Explicit internal sends use durable outbox/inbox commits and permanent receiver receipts; unavailable receivers remain pending. Persisted record size is subject to the NATS maximum payload. A lost response may have committed; inspect definitions before retrying.")
   @post @route("/deploy/collection")
   op deployCollection(@body request: DeployRequest): CollectionDeployResponse | AppError;
 

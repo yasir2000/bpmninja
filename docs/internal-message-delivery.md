@@ -65,6 +65,10 @@ sequenceDiagram
   boundary catch is recorded with an occurrence marker and rearmed after commit.
   Replaying an old cleanup cannot resurrect a catch consumed by a later message.
 
+Payloads are JSON value snapshots. File references remain references to existing
+objects, not independent blob copies; shared object lifetime is separate from
+the message receive transaction.
+
 Each explicit flow has its own delivery ID. Fan-out is committed as a complete
 sender outbox; receiver delivery is independent/eventual, not an atomic transaction
 across all pools. There is no global FIFO guarantee. No message-name broadcast or
@@ -84,11 +88,14 @@ blocks continuation exposure until a required save succeeds. A restart instead
 uses the persisted snapshot. The receiver's committed inbox bridges a crash
 before permanent receipt creation; the permanent receipt bridges a crash before
 sender acknowledgment, including after the receiver is archived or deleted.
+Recovery may resume a receiver continuation from its already committed snapshot
+before finalizing the permanent receipt; the persisted inbox remains its bridge.
 Snapshots are checked against the instance payload limit. Malformed or unsupported
 outbox records fail closed; current records use protocol version 1.
 
 Deleting a sender with pending deliveries is rejected to prevent outbox loss.
-Deleting a receiver first retains any committed inbox receipts permanently.
+Deleting a receiver first confirms any unacknowledged candidate snapshot and
+retains its committed inbox receipts permanently.
 Delivery UUIDs and receipts have no TTL. Explicit cancellation/unbinding controls
 are not yet exposed through REST or the desktop UI.
 
