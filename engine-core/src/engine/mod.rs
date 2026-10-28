@@ -37,8 +37,12 @@ pub(crate) mod handlers;
 mod instance_ops;
 pub(crate) mod instance_store;
 mod loops;
+mod message_delivery;
 mod message_processor;
 mod message_routing;
+pub use message_delivery::{
+    MessageCleanup, MessageDelivery, MessageInbox, MessageReceipt, MessageReceiver,
+};
 pub use message_routing::{
     DeployedMessageEndpoint, InternalMessagePlan, PinnedMessageRoute, PlannedMessageReceiver,
     ReceiverUnavailable,
@@ -60,6 +64,10 @@ pub use task_handler::{IN_PROCESS_WORKER_ID, TaskHandler, TaskOutcome};
 
 /// The central workflow engine managing definitions, instances, and handlers.
 pub struct WorkflowEngine {
+    pub(crate) message_unconfirmed: DashMap<Uuid, ()>,
+    pub(crate) message_dispatch_lock: tokio::sync::Mutex<()>,
+    pub(crate) message_instance_locks: persistence_ops::PersistLocks,
+    pub(crate) message_receipts: DashMap<Uuid, MessageReceipt>,
     pub(crate) internal_routes:
         std::sync::RwLock<std::collections::HashMap<Uuid, Vec<PinnedMessageRoute>>>,
     pub(crate) deployment_lock: tokio::sync::Mutex<()>,
@@ -112,6 +120,10 @@ impl WorkflowEngine {
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
 
         Self {
+            message_unconfirmed: DashMap::new(),
+            message_dispatch_lock: tokio::sync::Mutex::new(()),
+            message_instance_locks: persistence_ops::PersistLocks::new(),
+            message_receipts: DashMap::new(),
             internal_routes: std::sync::RwLock::new(std::collections::HashMap::new()),
             deployment_lock: tokio::sync::Mutex::new(()),
             definitions: registry::DefinitionRegistry::new(),

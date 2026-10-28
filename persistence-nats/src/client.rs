@@ -9,7 +9,8 @@ use futures::StreamExt;
 use tokio::sync::OnceCell;
 
 /// KV buckets created on connect; their handles are cached after first use.
-const KV_BUCKETS: [&str; 12] = [
+const KV_BUCKETS: [&str; 13] = [
+    "message_receipts",
     "definition_collections",
     "conditional_starts",
     "tokens",
@@ -238,6 +239,19 @@ impl NatsPersistence {
                 .map_err(|_| EngineError::PersistenceError(error.to_string()))?;
         }
 
+        if js.get_key_value("message_receipts").await.is_err()
+            && let Err(error) = js
+                .create_key_value(kv::Config {
+                    bucket: "message_receipts".into(),
+                    description: "Permanent internal message receiver receipts".into(),
+                    ..Default::default()
+                })
+                .await
+        {
+            js.get_key_value("message_receipts")
+                .await
+                .map_err(|_| EngineError::PersistenceError(error.to_string()))?;
+        }
         Ok(Self {
             client,
             js,

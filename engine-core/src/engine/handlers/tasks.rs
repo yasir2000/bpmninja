@@ -139,6 +139,12 @@ impl WorkflowEngine {
         current_id: &str,
         message_name: &str,
     ) -> EngineResult<NextAction> {
+        if self
+            .commit_internal_send(instance_id, token, def_clone, current_id)
+            .await?
+        {
+            return Ok(NextAction::Continue(token.clone()));
+        }
         tracing::info!(
             "Instance {instance_id}: send task '{current_id}' publishing message '{message_name}'"
         );

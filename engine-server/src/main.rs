@@ -148,6 +148,9 @@ async fn main() -> anyhow::Result<()> {
             tokio::select! {
                 _ = timer_engine.wait_for_timer_work(max_idle) => {
                     let engine = &timer_engine;
+                    if let Err(error) = engine.process_internal_messages().await {
+                        tracing::warn!("Internal message recovery deferred: {error}");
+                    }
                     match engine.process_timers().await {
                         Ok(0) => {} // No expired timers — silent
                         Ok(n) => tracing::info!("Timer scheduler: processed {} expired timer(s)", n),

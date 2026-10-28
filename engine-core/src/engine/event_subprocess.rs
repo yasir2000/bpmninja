@@ -67,6 +67,13 @@ fn queue_cancelled_activations(instance: &mut ProcessInstance, reason: &str) {
 }
 
 pub(crate) fn token_valid(instance: &ProcessInstance, token: &Token) -> bool {
+    if instance
+        .tokens
+        .get(&token.id)
+        .is_some_and(|current| current.message_revision > token.message_revision)
+    {
+        return false;
+    }
     if let Some(id) = token.boundary_activation
         && !instance.event_state.as_ref().is_some_and(|state| {
             state
@@ -629,7 +636,8 @@ impl WorkflowEngine {
         if !def.event_listeners.is_empty() {
             return Err(EngineError::InvalidDefinition("Legacy ScopeEventListener definitions are unsupported; migrate to EventSubProcess definitions".into()));
         }
-        if def.event_subprocesses.is_empty() && !def.has_conditionals() {
+        let routed = self.internal_routes.read().unwrap().contains_key(&def.key);
+        if def.event_subprocesses.is_empty() && !def.has_conditionals() && !routed {
             return Ok(());
         }
         let (timers, catches) = {
@@ -639,7 +647,8 @@ impl WorkflowEngine {
         if matches!(
             def.nodes.get(&token.current_node),
             Some(crate::BpmnElement::ConditionalStartEvent { .. })
-        ) {
+        ) || routed
+        {
             self.persist_instance_required(instance_id).await?;
         } else {
             self.persist_instance(instance_id).await;
@@ -963,6 +972,11 @@ impl WorkflowEngine {
     }
 
     pub(crate) async fn reconcile_event_instance(&self, id: Uuid) -> EngineResult<()> {
+        if self.message_unconfirmed.contains_key(&id) {
+            self.persist_instance_required(id).await?;
+            self.message_unconfirmed.remove(&id);
+        }
+
         let Some(instance) = self.instances.get(&id).await else {
             return Ok(());
         };
@@ -1363,7 +1377,7 @@ impl WorkflowEngine {
         }
     }
 
-    async fn abort_event_child(&self, id: Uuid) {
+    pub(crate) async fn abort_event_child(&self, id: Uuid) {
         let children = if let Some(instance) = self.instances.get(&id).await {
             let mut instance = instance.write().await;
             let children = instance

@@ -225,6 +225,10 @@ pub struct ProcessInstance {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EventSubProcessState {
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub message_outbox: HashMap<Uuid, crate::MessageDelivery>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub message_inbox: HashMap<Uuid, crate::MessageInbox>,
     #[serde(default)]
     pub boundary_activations: HashMap<Uuid, BoundaryActivation>,
     #[serde(default)]

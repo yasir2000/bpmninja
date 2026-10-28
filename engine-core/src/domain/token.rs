@@ -5,6 +5,9 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Token {
+    /// Monotonic send execution fence, including sequence-flow revisits.
+    #[serde(default)]
+    pub message_revision: u64,
     #[allow(dead_code)]
     pub id: Uuid,
     pub current_node: String,
@@ -107,6 +110,7 @@ impl Token {
     /// Creates a new token positioned at the given node with empty variables.
     pub fn new(start_node: &str) -> Self {
         Self {
+            message_revision: 0,
             id: Uuid::new_v4(),
             current_node: start_node.to_string(),
             conditional_wait: None,
@@ -123,6 +127,7 @@ impl Token {
     #[allow(dead_code)]
     pub fn with_variables(start_node: &str, variables: HashMap<String, Value>) -> Self {
         Self {
+            message_revision: 0,
             id: Uuid::new_v4(),
             current_node: start_node.to_string(),
             conditional_wait: None,

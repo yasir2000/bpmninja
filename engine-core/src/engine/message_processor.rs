@@ -188,6 +188,10 @@ impl WorkflowEngine {
                 Some(crate::domain::BpmnElement::BoundarySignalEvent { attached_to, .. }) => {
                     Some(attached_to.as_str())
                 }
+                Some(
+                    crate::domain::BpmnElement::MessageCatchEvent { .. }
+                    | crate::domain::BpmnElement::SignalCatchEvent { .. },
+                ) => Some(catch.node_id.as_str()),
                 _ => None,
             };
             if let Some(expected) = expected

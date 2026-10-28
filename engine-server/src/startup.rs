@@ -49,6 +49,7 @@ impl StartupCoordinator {
         let timers = self.restore_timers(engine).await?;
         let message_catches = self.restore_message_catches(engine).await?;
         engine.reconcile_conditional_starts().await?;
+        engine.process_internal_messages().await?;
 
         Ok(RestoreStats {
             definitions,

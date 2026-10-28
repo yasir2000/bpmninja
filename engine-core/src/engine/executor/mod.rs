@@ -28,6 +28,10 @@ impl WorkflowEngine {
     ) -> EngineResult<()> {
         // History of this batch is buffered and written in one call — also when
         // the batch fails, so no recorded step is lost.
+        if self.message_unconfirmed.contains_key(&instance_id) {
+            self.persist_instance_required(instance_id).await?;
+            self.message_unconfirmed.remove(&instance_id);
+        }
         let initial_generation = initial_token
             .event_context
             .as_ref()
@@ -80,6 +84,9 @@ impl WorkflowEngine {
 
         let finished = self.finish_instance_batch(instance_id).await;
         self.deliver_queued_signals().await;
+        if let Err(error) = Box::pin(self.process_internal_messages()).await {
+            tracing::warn!("Internal message dispatch deferred: {error}");
+        }
         finished
     }
 
@@ -103,6 +110,14 @@ impl WorkflowEngine {
         let mut conditional_count = 0usize;
 
         while let Some(mut token) = queue.pop_front() {
+            let _message_step = if self
+                .is_internal_send(instance_id, &token.current_node)
+                .await
+            {
+                Some(self.message_instance_locks.lock(instance_id).await)
+            } else {
+                None
+            };
             // Serialize a claimed occurrence through its start/end callbacks and
             // durable continuation, so concurrent replay cannot repeat callbacks.
             let _conditional_step_guard = if token.conditional_wait.is_some() {

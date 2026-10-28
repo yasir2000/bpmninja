@@ -101,6 +101,25 @@ pub struct StorageInfo {
 /// A trait for persisting workflow engine state.
 #[async_trait]
 pub trait WorkflowPersistence: Send + Sync {
+    /// Permanent receipt, written only after the receiver snapshot commits.
+    /// Atomic create-or-return; conflicting reuse must fail closed.
+    async fn reserve_message_receipt(
+        &self,
+        _: &crate::MessageReceipt,
+    ) -> EngineResult<crate::MessageReceipt> {
+        Err(crate::EngineError::PersistenceError(
+            "Internal message receipts unsupported by backend".into(),
+        ))
+    }
+    async fn get_message_receipt(
+        &self,
+        _: uuid::Uuid,
+    ) -> EngineResult<Option<crate::MessageReceipt>> {
+        Err(crate::EngineError::PersistenceError(
+            "Internal message receipts unsupported by backend".into(),
+        ))
+    }
+
     /// Atomically create or return the existing immutable evaluation identity/result.
     async fn reserve_conditional_start(
         &self,

@@ -179,6 +179,9 @@ pub(super) struct InstrumentedPersistence {
     pub(super) history_failures: AtomicUsize,
     pub(super) serialized_payloads: std::sync::Mutex<Vec<Vec<u8>>>,
     pub(super) save_failures: AtomicUsize,
+    pub(super) outbox_failures: AtomicUsize,
+    pub(super) inbox_failures: AtomicUsize,
+    pub(super) receipt_failures: AtomicUsize,
 }
 
 impl InstrumentedPersistence {
@@ -193,12 +196,43 @@ impl InstrumentedPersistence {
             history_failures: AtomicUsize::new(0),
             serialized_payloads: std::sync::Mutex::new(Vec::new()),
             save_failures: AtomicUsize::new(0),
+            outbox_failures: AtomicUsize::new(0),
+            inbox_failures: AtomicUsize::new(0),
+            receipt_failures: AtomicUsize::new(0),
         }
     }
 }
 
 #[async_trait::async_trait]
 impl WorkflowPersistence for InstrumentedPersistence {
+    async fn save_definition_collection(
+        &self,
+        collection: &crate::DefinitionCollection,
+    ) -> EngineResult<()> {
+        self.inner.save_definition_collection(collection).await
+    }
+    async fn list_definition_collections(&self) -> EngineResult<Vec<crate::DefinitionCollection>> {
+        self.inner.list_definition_collections().await
+    }
+    async fn get_message_receipt(&self, id: Uuid) -> EngineResult<Option<crate::MessageReceipt>> {
+        self.inner.get_message_receipt(id).await
+    }
+    async fn reserve_message_receipt(
+        &self,
+        receipt: &crate::MessageReceipt,
+    ) -> EngineResult<crate::MessageReceipt> {
+        if self
+            .receipt_failures
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(crate::EngineError::PersistenceError(
+                "injected receipt failure".into(),
+            ));
+        }
+        self.inner.reserve_message_receipt(receipt).await
+    }
+
     async fn reserve_conditional_start(
         &self,
         receipt: &crate::ConditionalStartReceipt,
@@ -248,6 +282,25 @@ impl WorkflowPersistence for InstrumentedPersistence {
         json: &[u8],
     ) -> EngineResult<()> {
         self.serialized_payloads.lock().unwrap().push(json.to_vec());
+        if let Some(state) = &instance.event_state {
+            let failures = if !state.message_inbox.is_empty() {
+                Some(&self.inbox_failures)
+            } else if !state.message_outbox.is_empty() {
+                Some(&self.outbox_failures)
+            } else {
+                None
+            };
+            if failures.is_some_and(|failures| {
+                failures
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                    .is_ok()
+            }) {
+                return Err(crate::EngineError::PersistenceError(
+                    "injected message snapshot failure".into(),
+                ));
+            }
+        }
+
         if self
             .save_failures
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))

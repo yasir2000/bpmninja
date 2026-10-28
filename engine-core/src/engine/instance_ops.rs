@@ -569,6 +569,7 @@ impl WorkflowEngine {
         }
 
         let token = crate::domain::Token {
+            message_revision: 0,
             conditional_wait: None,
             boundary_activation: None,
             id: Uuid::new_v4(),
@@ -845,6 +846,12 @@ impl WorkflowEngine {
 
     /// Deletes a process instance and cleans up associated pending tasks.
     pub async fn delete_instance(&self, instance_id: Uuid) -> EngineResult<()> {
+        let _message_step = self.message_instance_locks.lock(instance_id).await;
+        if let Some(instance) = self.instances.get(&instance_id).await {
+            let snapshot = instance.read().await.clone();
+            self.retain_instance_message_receipts(&snapshot).await?;
+        }
+
         let removed_inst_arc = self
             .instances
             .remove(&instance_id)

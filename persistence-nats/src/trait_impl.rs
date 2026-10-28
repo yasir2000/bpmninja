@@ -248,6 +248,45 @@ impl WorkflowPersistence for NatsPersistence {
         Ok(())
     }
 
+    async fn reserve_message_receipt(
+        &self,
+        receipt: &engine_core::MessageReceipt,
+    ) -> EngineResult<engine_core::MessageReceipt> {
+        let store = self.kv("message_receipts").await?;
+        let data = serde_json::to_vec(receipt)
+            .map_err(|e| EngineError::PersistenceError(e.to_string()))?;
+        if let Err(error) = store
+            .create(receipt.delivery.id.to_string(), data.into())
+            .await
+        {
+            let existing = self
+                .get_message_receipt(receipt.delivery.id)
+                .await?
+                .ok_or_else(|| EngineError::PersistenceError(error.to_string()))?;
+            if existing != *receipt {
+                return Err(EngineError::PersistenceError(
+                    "Conflicting internal delivery ID".into(),
+                ));
+            }
+            return Ok(existing);
+        }
+        Ok(receipt.clone())
+    }
+    async fn get_message_receipt(
+        &self,
+        id: uuid::Uuid,
+    ) -> EngineResult<Option<engine_core::MessageReceipt>> {
+        self.kv("message_receipts")
+            .await?
+            .get(id.to_string())
+            .await
+            .map_err(|e| EngineError::PersistenceError(e.to_string()))?
+            .map(|data| {
+                serde_json::from_slice(&data)
+                    .map_err(|e| EngineError::PersistenceError(e.to_string()))
+            })
+            .transpose()
+    }
     async fn save_definition_collection(
         &self,
         collection: &engine_core::DefinitionCollection,

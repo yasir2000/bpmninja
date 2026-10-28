@@ -26,3 +26,5 @@ pub use engine::{
     DeployedMessageEndpoint, InternalMessagePlan, PinnedMessageRoute, PlannedMessageReceiver,
     ReceiverUnavailable,
 };
+
+pub use engine::{MessageCleanup, MessageDelivery, MessageInbox, MessageReceipt, MessageReceiver};

@@ -19,6 +19,7 @@ use crate::runtime::{
 
 #[derive(Default, Clone)]
 pub struct InMemoryPersistence {
+    message_receipts: Arc<RwLock<HashMap<uuid::Uuid, crate::MessageReceipt>>>,
     collections: Arc<RwLock<HashMap<uuid::Uuid, crate::DefinitionCollection>>>,
     conditional_starts: Arc<RwLock<HashMap<uuid::Uuid, crate::ConditionalStartReceipt>>>,
     tokens: Arc<RwLock<HashMap<String, Vec<Token>>>>,
@@ -42,6 +43,28 @@ impl InMemoryPersistence {
 
 #[async_trait]
 impl WorkflowPersistence for InMemoryPersistence {
+    async fn reserve_message_receipt(
+        &self,
+        receipt: &crate::MessageReceipt,
+    ) -> EngineResult<crate::MessageReceipt> {
+        let mut receipts = self.message_receipts.write().await;
+        let existing = receipts
+            .entry(receipt.delivery.id)
+            .or_insert_with(|| receipt.clone());
+        if existing != receipt {
+            return Err(crate::EngineError::PersistenceError(
+                "Conflicting internal delivery ID".into(),
+            ));
+        }
+        Ok(existing.clone())
+    }
+    async fn get_message_receipt(
+        &self,
+        id: uuid::Uuid,
+    ) -> EngineResult<Option<crate::MessageReceipt>> {
+        Ok(self.message_receipts.read().await.get(&id).cloned())
+    }
+
     async fn reserve_conditional_start(
         &self,
         receipt: &crate::ConditionalStartReceipt,

@@ -7,7 +7,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-fn sender() -> ProcessDefinition {
+pub(super) fn sender() -> ProcessDefinition {
     ProcessDefinitionBuilder::new("sender")
         .node("s", BpmnElement::StartEvent)
         .node(
@@ -23,7 +23,7 @@ fn sender() -> ProcessDefinition {
         .build()
         .unwrap()
 }
-fn receiver(start: bool) -> ProcessDefinition {
+pub(super) fn receiver(start: bool) -> ProcessDefinition {
     let builder = ProcessDefinitionBuilder::new("receiver");
     let builder = if start {
         builder.node(
@@ -51,7 +51,7 @@ fn receiver(start: bool) -> ProcessDefinition {
         .build()
         .unwrap()
 }
-fn metadata() -> serde_json::Value {
+pub(super) fn metadata() -> serde_json::Value {
     serde_json::to_value(vec![Collaboration {
         id: "c".into(),
         participants: vec![
@@ -84,13 +84,16 @@ fn metadata() -> serde_json::Value {
     }])
     .unwrap()
 }
-async fn deploy(engine: &WorkflowEngine, receiver: ProcessDefinition) -> DefinitionCollection {
+pub(super) async fn deploy(
+    engine: &WorkflowEngine,
+    receiver: ProcessDefinition,
+) -> DefinitionCollection {
     engine
         .deploy_collection(vec![sender(), receiver], "xml".into(), metadata())
         .await
         .unwrap()
 }
-fn key(collection: &DefinitionCollection, id: &str) -> Uuid {
+pub(super) fn key(collection: &DefinitionCollection, id: &str) -> Uuid {
     collection
         .definitions
         .iter()
@@ -98,7 +101,7 @@ fn key(collection: &DefinitionCollection, id: &str) -> Uuid {
         .unwrap()
         .key
 }
-async fn wait(engine: &WorkflowEngine, definition: Uuid, business: &str) -> Uuid {
+pub(super) async fn wait(engine: &WorkflowEngine, definition: Uuid, business: &str) -> Uuid {
     engine
         .start_instance_with_variables(
             definition,
